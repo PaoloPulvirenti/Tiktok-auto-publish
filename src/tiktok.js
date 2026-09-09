@@ -219,6 +219,26 @@ export async function queryCreatorInfo(accessToken) {
   return apiPost('/v2/post/publish/creator_info/query/', {}, accessToken, 'creator_info/query');
 }
 
+/** Body esatto inviato a video/init: usato anche dall'anteprima --dry-run. */
+export function buildInitBody({ title, videoSize }) {
+  return {
+    post_info: {
+      title,
+      privacy_level: config.tiktok.privacyLevel,
+      disable_comment: false,
+      disable_duet: false,
+      disable_stitch: false,
+    },
+    source_info: {
+      source: 'FILE_UPLOAD',
+      video_size: videoSize,
+      // Upload in un colpo solo: il chunk coincide con l'intero file.
+      chunk_size: videoSize,
+      total_chunk_count: 1,
+    },
+  };
+}
+
 /**
  * Step 2 — video/init.
  * Riserva la pubblicazione e restituisce { publish_id, upload_url }.
@@ -226,22 +246,7 @@ export async function queryCreatorInfo(accessToken) {
 export async function initVideoUpload(accessToken, { title, videoSize }) {
   const data = await apiPost(
     '/v2/post/publish/video/init/',
-    {
-      post_info: {
-        title,
-        privacy_level: config.tiktok.privacyLevel,
-        disable_comment: false,
-        disable_duet: false,
-        disable_stitch: false,
-      },
-      source_info: {
-        source: 'FILE_UPLOAD',
-        video_size: videoSize,
-        // Upload in un colpo solo: il chunk coincide con l'intero file.
-        chunk_size: videoSize,
-        total_chunk_count: 1,
-      },
-    },
+    buildInitBody({ title, videoSize }),
     accessToken,
     'video/init'
   );
@@ -338,6 +343,25 @@ export async function waitForPublish(accessToken, publishId) {
   );
 }
 
+const mb = (n) => (n / 1024 / 1024).toFixed(1);
+
+/**
+ * Verifica che il file sia caricabile in un unico chunk.
+ * Usata sia dal post vero sia dall'anteprima --dry-run.
+ */
+export function assertUploadable(videoSize, fileName) {
+  if (videoSize === 0) {
+    throw new Error(`Il file ${fileName} è vuoto (0 byte).`);
+  }
+  if (videoSize > config.tiktok.maxSingleChunkBytes) {
+    throw new Error(
+      `Il file ${fileName} pesa ${mb(videoSize)} MB e supera il limite di ` +
+        `${mb(config.tiktok.maxSingleChunkBytes)} MB per l'upload in un unico chunk. ` +
+        'Comprimi il video: questo tool non implementa (ancora) il chunking.'
+    );
+  }
+}
+
 /**
  * Flusso completo: creator_info -> init -> upload -> polling.
  * Restituisce { publishId, status }.
@@ -345,18 +369,7 @@ export async function waitForPublish(accessToken, publishId) {
 export async function publishVideo({ filePath, title }) {
   const buffer = await fs.readFile(filePath);
   const videoSize = buffer.length;
-
-  if (videoSize === 0) {
-    throw new Error(`Il file ${path.basename(filePath)} è vuoto (0 byte).`);
-  }
-  if (videoSize > config.tiktok.maxSingleChunkBytes) {
-    const mb = (n) => (n / 1024 / 1024).toFixed(1);
-    throw new Error(
-      `Il file ${path.basename(filePath)} pesa ${mb(videoSize)} MB e supera il limite di ` +
-        `${mb(config.tiktok.maxSingleChunkBytes)} MB per l'upload in un unico chunk. ` +
-        'Comprimi il video: questo tool non implementa (ancora) il chunking.'
-    );
-  }
+  assertUploadable(videoSize, path.basename(filePath));
 
   const accessToken = await getAccessToken();
 
@@ -367,7 +380,7 @@ export async function publishVideo({ filePath, title }) {
     console.log(`Durata massima consentita: ${creatorInfo.max_video_post_duration_sec}s`);
   }
 
-  console.log(`Init upload (${(videoSize / 1024 / 1024).toFixed(1)} MB)...`);
+  console.log(`Init upload (${mb(videoSize)} MB)...`);
   const { publishId, uploadUrl } = await initVideoUpload(accessToken, { title, videoSize });
 
   console.log(`Upload dei byte (publish_id=${publishId})...`);

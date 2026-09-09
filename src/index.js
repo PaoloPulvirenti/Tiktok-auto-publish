@@ -4,15 +4,17 @@
  *   coda -> brief -> caption (Anthropic) -> post TikTok (SELF_ONLY) -> archivio
  *
  *   npm run post
+ *   npm run post -- --dry-run   (genera la caption e mostra cosa farebbe, senza pubblicare)
  */
 import fs from 'node:fs/promises';
 import path from 'node:path';
+import { pathToFileURL } from 'node:url';
 import { config } from '../config.js';
 import { generateCaption } from './anthropic.js';
-import { publishVideo } from './tiktok.js';
+import { assertUploadable, buildInitBody, publishVideo } from './tiktok.js';
 
 /** Elenca i video in coda, già ordinati secondo config.video.order. */
-async function listQueue() {
+export async function listQueue() {
   let entries;
   try {
     entries = await fs.readdir(config.paths.queueDir, { withFileTypes: true });
@@ -40,7 +42,7 @@ async function listQueue() {
 }
 
 /** Legge il brief dal sidecar .txt con lo stesso nome del video, o usa il default. */
-async function readBrief(videoPath) {
+export async function readBrief(videoPath) {
   const sidecar = videoPath.replace(/\.[^.]+$/, '.txt');
   try {
     const text = (await fs.readFile(sidecar, 'utf8')).trim();
@@ -55,7 +57,7 @@ async function readBrief(videoPath) {
 }
 
 /** Sposta un file gestendo anche i filesystem diversi (EXDEV) e le collisioni. */
-async function moveFile(from, to) {
+export async function moveFile(from, to) {
   let target = to;
   try {
     await fs.access(target);
@@ -77,7 +79,7 @@ async function moveFile(from, to) {
   return target;
 }
 
-async function archive(videoPath, sidecarPath, caption) {
+export async function archive(videoPath, sidecarPath, caption) {
   await fs.mkdir(config.paths.postedDir, { recursive: true });
 
   const destination = path.join(config.paths.postedDir, path.basename(videoPath));
@@ -98,7 +100,23 @@ async function archive(videoPath, sidecarPath, caption) {
   return moved;
 }
 
-async function main() {
+/** Riconosce i flag da riga di comando, rifiutando quelli sconosciuti. */
+export function parseArgs(argv) {
+  const options = { dryRun: false };
+  for (const arg of argv) {
+    if (arg === '--dry-run' || arg === '-n') {
+      options.dryRun = true;
+    } else {
+      throw new Error(`Argomento sconosciuto: ${arg}. Uso: node src/index.js [--dry-run]`);
+    }
+  }
+  return options;
+}
+
+export async function main(argv = process.argv.slice(2)) {
+  const { dryRun } = parseArgs(argv);
+  if (dryRun) console.log('--- DRY RUN: nessuna chiamata a TikTok, niente viene archiviato ---');
+
   const queue = await listQueue();
 
   if (queue.length === 0) {
@@ -116,6 +134,16 @@ async function main() {
   const caption = await generateCaption(brief, { fileName });
   console.log(`Caption (${caption.length} caratteri): ${caption}`);
 
+  if (dryRun) {
+    const { size } = await fs.stat(videoPath);
+    // Stessa validazione del post vero: un file troppo grande fallisce già qui.
+    assertUploadable(size, fileName);
+    console.log(`\nBody che verrebbe inviato a video/init:`);
+    console.log(JSON.stringify(buildInitBody({ title: caption, videoSize: size }), null, 2));
+    console.log(`\nIl video resta in ${config.paths.queueDir}. Nessun post consumato.`);
+    return;
+  }
+
   const { publishId, status } = await publishVideo({ filePath: videoPath, title: caption });
   console.log(`Pubblicato: ${status} (publish_id=${publishId})`);
 
@@ -128,8 +156,11 @@ async function main() {
   );
 }
 
-main().catch((err) => {
-  console.error(`\nErrore: ${err.message}`);
-  if (process.env.DEBUG) console.error(err);
-  process.exit(1);
-});
+// Esegue solo se lanciato direttamente: importarlo (test inclusi) non pubblica nulla.
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+  main().catch((err) => {
+    console.error(`\nErrore: ${err.message}`);
+    if (process.env.DEBUG) console.error(err);
+    process.exit(1);
+  });
+}

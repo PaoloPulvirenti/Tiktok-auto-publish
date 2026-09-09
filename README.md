@@ -24,6 +24,16 @@ videos/queue/  ->  [cron mattutino]  ->  caption (Anthropic)  ->  post TikTok (p
 - A fine corsa video, brief e un `.caption.txt` con la caption usata finiscono
   in `videos/posted/`.
 
+## Comandi
+
+| Comando | Cosa fa |
+| --- | --- |
+| `npm run auth` | Autorizzazione OAuth one-time, crea `tokens.json`. |
+| `npm run check` | Diagnostica: env, token, permessi TikTok e coda. **Non pubblica niente.** |
+| `npm run post -- --dry-run` | Genera la caption e mostra il body che invierebbe. **Non pubblica niente.** |
+| `npm run post` | Il post vero. |
+| `npm test` | Suite di test con le API mockate: gira senza credenziali. |
+
 ## Setup
 
 1. **Dipendenze**
@@ -52,9 +62,25 @@ videos/queue/  ->  [cron mattutino]  ->  caption (Anthropic)  ->  post TikTok (p
    (il refresh token dura ~1 anno, l'access token ~24h e si rinnova da solo
    a ogni post).
 
-5. **Test manuale**
+5. **Verifica la configurazione**
+   ```bash
+   npm run check
+   ```
+   Controlla `.env`, `tokens.json`, gli scope concessi, chiama `creator_info`
+   e ispeziona la coda — senza pubblicare nulla. Esce con codice 1 se qualcosa
+   non va.
+
+6. **Prova a vuoto**
    ```bash
    # metti un video di prova in videos/queue/, poi:
+   npm run post -- --dry-run
+   ```
+   Genera la caption vera con Anthropic e stampa il body che manderebbe a
+   `video/init`, poi si ferma: nessuna chiamata a TikTok, il video resta in
+   coda e non consumi uno dei ~15 post giornalieri.
+
+7. **Il post vero**
+   ```bash
    npm run post
    ```
 
@@ -99,9 +125,24 @@ src/auth.js        flow OAuth one-time -> tokens.json
 src/tiktok.js      refresh token + creator_info -> init -> upload -> status/fetch
 src/anthropic.js   generazione della caption (/v1/messages)
 src/index.js       orchestratore: coda -> caption -> post -> archivio
+src/check.js       diagnostica (npm run check)
+test/              suite con le API mockate
 videos/queue/      i video da pubblicare (+ eventuali brief .txt)
 videos/posted/     archivio dei video già pubblicati
 ```
+
+## Test
+
+```bash
+npm test
+```
+
+51 test su `node:test` con `fetch` mockato: nessuna credenziale, nessuna
+chiamata di rete, nessun video pubblicato. Coprono i punti in cui è facile
+sbagliare con l'API TikTok — il body di `video/init`, l'header `Content-Range`
+senza `Content-Length`, gli HTTP 200 che contengono un errore, il refresh del
+token e il fatto che un post fallito **non** archivia il video (così il giorno
+dopo ci riprova).
 
 ## Note importanti
 
@@ -125,6 +166,7 @@ videos/posted/     archivio dei video già pubblicati
 | `redirect_uri` mismatch in fase di auth | La URI nel `.env` non è identica, carattere per carattere, a quella registrata nell'app TikTok. |
 | `La porta 5173 è già occupata` | Un altro processo usa la porta: cambia `AUTH_PORT` (e la redirect URI registrata). |
 | `tokens.json non trovato` | Non hai ancora eseguito `npm run auth`, o il cron gira in un'altra cartella. |
+| Errore di permessi al primo post | Manca lo scope `video.publish`: `npm run check` te lo dice prima di provarci. |
 | Errore `spam_risk_too_many_posts` | Hai superato il limite giornaliero di post dell'account. |
 | Il video non compare tra i pubblici | È corretto: è privato finché non lo rendi visibile a "Tutti" dall'app. |
 | `status/fetch` in timeout | Il video è ancora in elaborazione: controlla l'app **prima** di ripubblicarlo, per non caricarlo due volte. |

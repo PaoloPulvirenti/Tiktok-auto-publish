@@ -8,7 +8,9 @@
   },
   "scripts": {
     "auth": "node src/auth.js",
-    "post": "node src/index.js"
+    "check": "node src/check.js",
+    "post": "node src/index.js",
+    "test": "node --test test/*.test.js"
   },
   "dependencies": {
     "dotenv": "^16.4.5"
