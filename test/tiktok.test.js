@@ -145,10 +145,18 @@ describe('gestione token', () => {
     assert.match(err.message, /Refresh token is invalid/);
   });
 
-  test('salva tokens.json con permessi 600', async () => {
+  // Su Windows chmod è un no-op: i permessi POSIX non esistono.
+  test('salva tokens.json con permessi 600', { skip: process.platform === 'win32' }, async () => {
     await saveTokens({ access_token: 'A', refresh_token: 'R', expires_at: Date.now() });
     const stat = await fs.stat(config.paths.tokensFile);
     assert.equal(stat.mode & 0o777, 0o600);
+  });
+
+  test('saveTokens riscrive il file preservando i campi', async () => {
+    await saveTokens({ access_token: 'A', refresh_token: 'R', expires_at: 42 });
+    const saved = JSON.parse(await fs.readFile(config.paths.tokensFile, 'utf8'));
+    assert.equal(saved.access_token, 'A');
+    assert.equal(saved.refresh_token, 'R');
   });
 });
 
