@@ -1,0 +1,12 @@
+node_modules/
+.env
+tokens.json
+
+# log del cron
+*.log
+
+# video: la coda e l'archivio restano locali
+videos/queue/*
+videos/posted/*
+!videos/queue/.gitkeep
+!videos/posted/.gitkeep
