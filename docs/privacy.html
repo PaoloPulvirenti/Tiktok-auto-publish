@@ -1,0 +1,82 @@
+<!doctype html>
+<html lang="it">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Informativa sulla privacy — tiktok-daily-poster</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<h1>Informativa sulla privacy</h1>
+<p class="sub">Ultimo aggiornamento: 10 settembre 2026</p>
+
+<h2>In breve</h2>
+<p>
+  "tiktok-daily-poster" è uno strumento personale usato da una sola persona — il
+  titolare dell'account TikTok collegato — per pubblicare sul proprio profilo.
+  <strong>Non raccoglie dati di altri utenti</strong>, non ha visitatori, non usa
+  cookie e non effettua alcuna profilazione.
+</p>
+
+<h2>Titolare del trattamento</h2>
+<p>Paolo Pulvirenti — paolo.pulvirenti31@gmail.com</p>
+
+<h2>Quali dati vengono trattati</h2>
+<p>Lo strumento tratta esclusivamente dati riferiti all'account del titolare:</p>
+<ul>
+  <li>
+    <strong>Token di accesso e di aggiornamento TikTok</strong>, ottenuti tramite
+    il flusso OAuth ufficiale dopo l'autorizzazione esplicita del titolare. Servono
+    unicamente a caricare i video sul suo profilo.
+  </li>
+  <li>
+    <strong>Informazioni di base del profilo</strong> (identificativo dell'account,
+    nome visualizzato, limiti di pubblicazione), lette tramite l'endpoint
+    <code>creator_info</code> per verificare che la pubblicazione sia possibile.
+  </li>
+  <li>
+    <strong>Fotografie e didascalie</strong> preparate dal titolare per i propri post.
+  </li>
+</ul>
+<p>Non vengono trattati dati di follower, commenti, messaggi o di altri utenti TikTok.</p>
+
+<h2>Dove sono conservati</h2>
+<p>
+  I token sono salvati in un file locale sul computer del titolare, con permessi di
+  lettura riservati al suo utente, oppure — nel caso dell'esecuzione automatica — in
+  un "secret" cifrato del repository GitHub del titolare. Non vengono trasmessi ad
+  alcun server dell'autore: non esiste un server dell'autore. Le uniche destinazioni
+  delle chiamate di rete sono le API ufficiali di TikTok, di Anthropic (per scrivere
+  la didascalia) e di Google Gemini (per la generazione dell'immagine, quando
+  attiva).
+</p>
+
+<h2>Comunicazione a terzi</h2>
+<p>
+  Nessun dato viene venduto, ceduto o comunicato a terzi. I fornitori sopra citati
+  trattano i dati che ricevono secondo le rispettive informative.
+</p>
+
+<h2>Conservazione</h2>
+<p>
+  I token restano validi finché il titolare non revoca l'autorizzazione dalle
+  impostazioni del proprio account TikTok, cosa che può fare in qualsiasi momento.
+  La revoca rende immediatamente inutilizzabile lo strumento. I file locali possono
+  essere cancellati in ogni momento eliminando <code>tokens.json</code>.
+</p>
+
+<h2>Diritti dell'interessato</h2>
+<p>
+  Poiché l'unico interessato è il titolare stesso, l'esercizio dei diritti previsti
+  dal GDPR (accesso, rettifica, cancellazione, limitazione, portabilità,
+  opposizione) si realizza direttamente attraverso il controllo dei propri file e
+  delle autorizzazioni nel proprio account TikTok. Per qualsiasi richiesta:
+  paolo.pulvirenti31@gmail.com
+</p>
+
+<nav>
+  <a href="index.html">Home</a>
+  <a href="terms.html">Termini di servizio</a>
+</nav>
+</body>
+</html>
