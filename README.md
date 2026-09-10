@@ -69,6 +69,28 @@ I modelli immagine di Gemini **non hanno free tier**: la chiave richiede la
 fatturazione attiva. Se vuoi più qualità, in `config.js` puoi passare a
 `gemini-3.1-flash-image` (~$2/mese) o `gemini-3-pro-image` (~$4/mese).
 
+## Due modalità
+
+Scegli con `POST_SOURCE` nel `.env`:
+
+| | `generated` (default) | `reference` |
+| --- | --- | --- |
+| Immagine | Claude inventa il modello, Gemini lo fotografa | una **tua** foto da `reference/`, a rotazione |
+| Caption | dall'idea inventata | Claude **guarda** la foto e descrive quella borsa |
+| `is_aigc` | `true` | `false` — le tue foto non sono generate da IA |
+| Serve `GEMINI_API_KEY` | sì | no |
+| Costo a post | ~$0.036 | ~$0.002 |
+
+```bash
+POST_SOURCE=reference npm run post -- --dry-run
+```
+
+In modalità `reference` la rotazione segue lo storico: prima le foto mai
+pubblicate (in ordine alfabetico), poi si ricomincia da quella pubblicata più
+tempo fa. Con `config.product.reusePhotos: false` invece si ferma quando le hai
+esaurite, invece di ripetersi. Le due modalità condividono lo stesso storico e
+convivono: puoi alternarle senza perdere il conto.
+
 ## Setup
 
 ### 1. Dipendenze

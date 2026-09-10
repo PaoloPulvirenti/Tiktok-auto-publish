@@ -6,6 +6,16 @@ dotenv.config();
 
 const rootDir = path.dirname(fileURLToPath(import.meta.url));
 
+/**
+ * Da dove arriva l'immagine del post:
+ *   'generated' -> Claude inventa il modello, Gemini lo fotografa (~$0.034/post)
+ *   'reference' -> usa a rotazione le TUE foto in reference/ (solo caption, ~$0.002/post)
+ */
+const postSource = process.env.POST_SOURCE || 'generated';
+if (!['generated', 'reference'].includes(postSource)) {
+  throw new Error(`POST_SOURCE non valido: "${postSource}". Valori ammessi: generated, reference.`);
+}
+
 /** Legge una env var obbligatoria, con errore parlante se manca. */
 export function requireEnv(name) {
   const value = process.env[name];
@@ -38,9 +48,10 @@ export const config = {
     // App non auditata: il video atterra comunque privato, qualunque valore inviamo.
     // Con l'audit approvato basta cambiare questo in 'PUBLIC_TO_EVERYONE'.
     privacyLevel: 'SELF_ONLY',
-    // Contenuto generato da IA: TikTok richiede la dichiarazione sui contenuti
-    // realistici e applica il tag "AI-generated" nella descrizione.
-    isAigc: true,
+    // Dichiarazione AIGC: obbligatoria per l'immagine generata, ma FALSA per le
+    // tue foto reali — dichiararle generate sarebbe sbagliato oltre che ingiusto
+    // verso il tuo lavoro.
+    isAigc: postSource === 'generated',
     // Oltre questa soglia servirebbe l'upload multi-chunk (non implementato).
     maxSingleChunkBytes: 64 * 1024 * 1024,
     // Polling di status/fetch
@@ -86,6 +97,8 @@ export const config = {
   },
 
   product: {
+    // 'generated' (Gemini) oppure 'reference' (le tue foto). Vedi POST_SOURCE.
+    source: postSource,
     /**
      * Che cosa vendi e come. Guida sia l'idea del modello sia la caption:
      * è il posto giusto dove cambiare nicchia, materiali o tono.
@@ -102,6 +115,9 @@ export const config = {
     imagesPerPost: 1,
     // Quanti modelli recenti passare a Claude perché non si ripeta.
     historyWindow: 30,
+    // Modalità 'reference': quando tutte le foto sono già state usate, si
+    // ricomincia dalla meno recente invece di fermarsi.
+    reusePhotos: true,
   },
 
   caption: {

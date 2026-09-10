@@ -16,6 +16,14 @@ import { renderSlideshow, runFfmpeg } from '../src/slideshow.js';
 
 const run = promisify(execFile);
 
+// ffprobe sta accanto a ffmpeg: se hai indicato FFMPEG_PATH usiamo quella cartella,
+// così lo script gira anche con un ffmpeg fuori dal PATH.
+const ffprobePath =
+  process.env.FFPROBE_PATH ||
+  (process.env.FFMPEG_PATH
+    ? path.join(path.dirname(process.env.FFMPEG_PATH), 'ffprobe')
+    : 'ffprobe');
+
 const workDir = await fs.mkdtemp(path.join(os.tmpdir(), 'tdp-smoke-'));
 config.paths.outputDir = path.join(workDir, 'output');
 
@@ -31,7 +39,7 @@ try {
   const image = await fs.readFile(imagePath);
   const { videoPath, size } = await renderSlideshow([image], 'smoke');
 
-  const { stdout } = await run('ffprobe', [
+  const { stdout } = await run(ffprobePath, [
     '-v', 'error',
     '-select_streams', 'v:0',
     '-show_entries', 'stream=width,height:format=duration',

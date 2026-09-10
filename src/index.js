@@ -1,18 +1,21 @@
 #!/usr/bin/env node
 /**
- * Orchestratore del post giornaliero:
- *   storico -> idea (Claude) -> immagine (Gemini) -> slideshow (ffmpeg)
- *   -> caption (Claude) -> post TikTok (SELF_ONLY, is_aigc) -> storico
+ * Orchestratore del post giornaliero, in due modalità (config.product.source):
+ *   generated -> idea (Claude) + immagine (Gemini)      is_aigc: true
+ *   reference -> una TUA foto a rotazione, letta da Claude   is_aigc: false
+ * Poi in entrambe: slideshow (ffmpeg) -> caption (Claude) -> TikTok -> storico.
  *
  *   npm run post
- *   npm run post -- --dry-run   (fa tutto tranne la pubblicazione)
+ *   npm run post -- --dry-run       (fa tutto tranne la pubblicazione)
+ *   POST_SOURCE=reference npm run post
  */
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { config } from '../config.js';
-import { generateCaption, generateIdea } from './anthropic.js';
+import { describePhoto, generateCaption, generateIdea } from './anthropic.js';
 import { generateImage, listReferences } from './gemini.js';
+import { pickPhoto } from './photos.js';
 import { renderSlideshow } from './slideshow.js';
 import { appendEntry, recentNames } from './state.js';
 import { assertUploadable, buildInitBody, publishVideo } from './tiktok.js';
@@ -43,10 +46,8 @@ export function parseArgs(argv) {
   return options;
 }
 
-export async function main(argv = process.argv.slice(2), { run } = {}) {
-  const { dryRun } = parseArgs(argv);
-  if (dryRun) console.log('--- DRY RUN: nessuna chiamata a TikTok, niente viene salvato nello storico ---');
-
+/** Modalità 'generated': Claude inventa il modello, Gemini lo fotografa. */
+async function fromGemini() {
   const references = await listReferences();
   console.log(
     `Riferimenti (${references.length}): ${references.map((file) => path.basename(file)).join(', ')}`
@@ -68,6 +69,37 @@ export async function main(argv = process.argv.slice(2), { run } = {}) {
     console.log(`  ${(image.length / 1024).toFixed(0)} KB`);
     images.push(image);
   }
+  return { idea, images };
+}
+
+/** Modalità 'reference': a rotazione una delle tue foto, descritta da Claude. */
+async function fromMyPhotos() {
+  const photo = await pickPhoto();
+  console.log(
+    `Foto di oggi: ${photo.fileName}${photo.reused ? ' (già pubblicata: giro ricominciato)' : ''}`
+  );
+
+  const image = await fs.readFile(photo.filePath);
+  console.log(`  ${(image.length / 1024).toFixed(0)} KB`);
+
+  const idea = await describePhoto(image, photo.mimeType);
+  console.log(`\nModello: ${idea.name}`);
+  console.log(`  ${idea.description}`);
+
+  return { idea, images: [image], photo };
+}
+
+export async function main(argv = process.argv.slice(2), { run } = {}) {
+  const { dryRun } = parseArgs(argv);
+  if (dryRun) console.log('--- DRY RUN: nessuna chiamata a TikTok, niente viene salvato nello storico ---');
+  console.log(
+    config.product.source === 'reference'
+      ? 'Modalità: reference (le tue foto, nessuna immagine generata)'
+      : `Modalità: generated (immagine con ${config.gemini.model})`
+  );
+
+  const { idea, images, photo } =
+    config.product.source === 'reference' ? await fromMyPhotos() : await fromGemini();
 
   const baseName = baseNameFor(idea);
   console.log('\nMonto il video verticale...');
@@ -84,18 +116,20 @@ export async function main(argv = process.argv.slice(2), { run } = {}) {
     console.log(`\nImmagine: ${imagePaths.join(', ')}`);
     console.log(`Video:    ${videoPath}`);
     console.log('Nessun post consumato.');
-    return { idea, caption, videoPath, imagePaths, dryRun: true };
+    return { idea, caption, videoPath, imagePaths, photo, dryRun: true };
   }
 
   const { publishId, status } = await publishVideo({ filePath: videoPath, title: caption });
   console.log(`Pubblicato: ${status} (publish_id=${publishId})`);
 
   await appendEntry({
+    source: config.product.source,
     name: idea.name,
     description: idea.description,
-    imagePrompt: idea.imagePrompt,
+    ...(idea.imagePrompt ? { imagePrompt: idea.imagePrompt } : {}),
+    ...(photo ? { photo: photo.fileName } : {}),
     caption,
-    model: config.gemini.model,
+    ...(config.product.source === 'generated' ? { model: config.gemini.model } : {}),
     publishId,
     status,
   });
@@ -105,7 +139,7 @@ export async function main(argv = process.argv.slice(2), { run } = {}) {
     '\nIl video è su TikTok come PRIVATO. Aprilo nell\'app e cambia la visibilità in ' +
       '"Tutti" per renderlo pubblico.'
   );
-  return { idea, caption, videoPath, imagePaths, publishId, status };
+  return { idea, caption, videoPath, imagePaths, photo, publishId, status };
 }
 
 // Esegue solo se lanciato direttamente: importarlo (test inclusi) non pubblica nulla.

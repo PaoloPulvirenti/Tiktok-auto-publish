@@ -28,6 +28,8 @@ const original = {
   interval: config.tiktok.statusPollIntervalMs,
   imagesPerPost: config.product.imagesPerPost,
   maxBytes: config.tiktok.maxSingleChunkBytes,
+  source: config.product.source,
+  isAigc: config.tiktok.isAigc,
 };
 
 beforeEach(async () => {
@@ -58,6 +60,8 @@ afterEach(async () => {
   config.tiktok.statusPollIntervalMs = original.interval;
   config.product.imagesPerPost = original.imagesPerPost;
   config.tiktok.maxSingleChunkBytes = original.maxBytes;
+  config.product.source = original.source;
+  config.tiktok.isAigc = original.isAigc;
   await fs.rm(workDir, { recursive: true, force: true });
 });
 
@@ -291,5 +295,97 @@ describe('main', () => {
     });
     assert.match(err.message, /nessuna immagine/);
     assert.deepEqual(await readHistory(), []);
+  });
+});
+
+describe('modalità reference (le tue foto)', () => {
+  const PHOTO = { name: 'Borsa Rafia Mare', description: 'Borsa in rafia naturale a punto basso con manici tondi' };
+
+  /** In questa modalità Gemini non deve essere chiamato affatto. */
+  const referencePath = ({ caption = 'Fatta a mano in rafia 🧶 #uncinetto #handmade' } = {}) =>
+    mockFetch((url, init) => {
+      if (url.includes('anthropic')) {
+        const body = JSON.parse(init.body);
+        return /JSON/.test(body.system) ? claudeReply(JSON.stringify(PHOTO)) : claudeReply(caption);
+      }
+      if (url.includes('generativelanguage')) throw new Error('Gemini non deve essere chiamato');
+      if (url.includes('creator_info')) return apiOk({ creator_nickname: 'paolo' });
+      if (url.includes('video/init')) return apiOk({ publish_id: 'P7', upload_url: 'https://up.example/7' });
+      if (url.startsWith('https://up.example/')) return new Response('', { status: 201 });
+      if (url.includes('status/fetch')) return apiOk({ status: 'PUBLISH_COMPLETE' });
+      throw new Error(`URL non atteso: ${url}`);
+    });
+
+  beforeEach(() => {
+    config.product.source = 'reference';
+    config.tiktok.isAigc = false;
+  });
+
+  test('pubblica una foto vera senza generare nulla', async () => {
+    active = referencePath();
+    const out = await captureLog(() => main([], { run: fakeRun() }));
+
+    assert.match(out, /Modalità: reference/);
+    assert.match(out, /Foto di oggi: borsa\.jpg/);
+    assert.ok(!active.calls.some((c) => c.url.includes('generativelanguage')));
+  });
+
+  test('dichiara is_aigc false: le tue foto non sono generate da IA', async () => {
+    active = referencePath();
+    await captureLog(() => main([], { run: fakeRun() }));
+
+    const initBody = JSON.parse(active.calls.find((c) => c.url.includes('video/init')).body);
+    assert.equal(initBody.post_info.is_aigc, false);
+  });
+
+  test('manda la foto a Claude come immagine, non come testo', async () => {
+    active = referencePath();
+    await captureLog(() => main([], { run: fakeRun() }));
+
+    const visione = active.calls
+      .filter((c) => c.url.includes('anthropic'))
+      .map((c) => JSON.parse(c.body))
+      .find((body) => Array.isArray(body.messages[0].content));
+
+    assert.ok(visione, 'nessuna chiamata con contenuto strutturato');
+    const blocco = visione.messages[0].content.find((b) => b.type === 'image');
+    assert.equal(blocco.source.type, 'base64');
+    assert.equal(blocco.source.media_type, 'image/jpeg');
+    assert.equal(Buffer.from(blocco.source.data, 'base64').toString(), 'jpeg-bytes');
+  });
+
+  test('lo storico registra la foto usata, così domani tocca a un\'altra', async () => {
+    await fs.writeFile(path.join(config.paths.referenceDir, 'seconda.jpg'), 'altri-bytes');
+    active = referencePath();
+    await captureLog(() => main([], { run: fakeRun() }));
+
+    const [voce] = await readHistory(config.paths.historyFile);
+    assert.equal(voce.source, 'reference');
+    assert.equal(voce.photo, 'borsa.jpg');
+    assert.equal(voce.imagePrompt, undefined);
+    assert.equal(voce.model, undefined);
+
+    // secondo giro: tocca alla seconda foto
+    active.restore();
+    active = referencePath();
+    const out = await captureLog(() => main([], { run: fakeRun() }));
+    assert.match(out, /Foto di oggi: seconda\.jpg/);
+  });
+
+  test('--dry-run non consuma la foto', async () => {
+    active = referencePath();
+    await captureLog(() => main(['--dry-run'], { run: fakeRun() }));
+    assert.deepEqual(await readHistory(config.paths.historyFile), []);
+  });
+
+  test('errore parlante se non hai messo nessuna foto', async () => {
+    await fs.rm(config.paths.referenceDir, { recursive: true, force: true });
+    await fs.mkdir(config.paths.referenceDir, { recursive: true });
+    active = referencePath();
+    let err;
+    await captureLog(async () => {
+      err = await rejects(() => main([], { run: fakeRun() }));
+    });
+    assert.match(err.message, /Nessuna foto/);
   });
 });

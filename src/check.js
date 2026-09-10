@@ -9,6 +9,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import { config } from '../config.js';
 import { listReferences } from './gemini.js';
+import { listPhotos, pickPhoto } from './photos.js';
 import { runFfmpeg } from './slideshow.js';
 import { readHistory, recentNames } from './state.js';
 import { getAccessToken, loadTokens, queryCreatorInfo } from './tiktok.js';
@@ -28,17 +29,21 @@ function section(title) {
 
 async function checkEnv() {
   section('1. Variabili d\'ambiente (.env)');
-  for (const name of [
-    'ANTHROPIC_API_KEY',
-    'GEMINI_API_KEY',
-    'TIKTOK_CLIENT_KEY',
-    'TIKTOK_CLIENT_SECRET',
-  ]) {
+  const needed = ['ANTHROPIC_API_KEY', 'TIKTOK_CLIENT_KEY', 'TIKTOK_CLIENT_SECRET'];
+  // Con POST_SOURCE=reference non generiamo niente: la chiave Gemini non serve.
+  if (config.product.source === 'generated') needed.splice(1, 0, 'GEMINI_API_KEY');
+
+  for (const name of needed) {
     if (process.env[name]) ok(`${name} presente`);
     else bad(`${name} mancante — copia .env.example in .env e compilalo`);
   }
+  ok(`Modalità: ${config.product.source} (is_aigc: ${config.tiktok.isAigc})`);
   ok(`Modello testo: ${config.anthropic.model}`);
-  ok(`Modello immagine: ${config.gemini.model} (${config.gemini.imageSize}, ${config.gemini.aspectRatio})`);
+  if (config.product.source === 'generated') {
+    ok(`Modello immagine: ${config.gemini.model} (${config.gemini.imageSize}, ${config.gemini.aspectRatio})`);
+  } else {
+    ok('Nessuna immagine generata: si pubblicano le foto in reference/');
+  }
   ok(`Redirect URI: ${config.tiktok.redirectUri}`);
 }
 
@@ -53,7 +58,25 @@ async function checkFfmpeg() {
 }
 
 async function checkReferences() {
-  section('3. Foto di riferimento');
+  if (config.product.source === 'reference') {
+    section('3. Le tue foto (è da qui che escono i post)');
+    try {
+      const photos = await listPhotos();
+      ok(`${photos.length} foto: ${photos.map((file) => path.basename(file)).join(', ')}`);
+      const next = await pickPhoto();
+      ok(`prossima: ${next.fileName}${next.reused ? ' (giro ricominciato: già pubblicata)' : ''}`);
+      const history = await readHistory();
+      const usate = new Set(history.filter((entry) => entry.photo).map((entry) => entry.photo));
+      const rimaste = photos.filter((file) => !usate.has(path.basename(file))).length;
+      if (rimaste === 0) warn('tutte già pubblicate: il giro riparte dalla meno recente');
+      else ok(`${rimaste} mai pubblicate: ${rimaste} giorni prima di ripetersi`);
+    } catch (err) {
+      bad(err.message);
+    }
+    return;
+  }
+
+  section('3. Foto di riferimento (guidano la generazione)');
   try {
     const references = await listReferences();
     ok(`${references.length} riferimenti: ${references.map((file) => path.basename(file)).join(', ')}`);
