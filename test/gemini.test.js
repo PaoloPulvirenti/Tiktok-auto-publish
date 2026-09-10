@@ -68,6 +68,34 @@ describe('extractImage', () => {
     assert.deepEqual(extractImage({ output_image: { data: PNG.toString('base64') } }), PNG);
   });
 
+  test('legge l\'immagine dai blocchi steps[].content[]', () => {
+    const payload = {
+      id: 'v1_x',
+      status: 'completed',
+      object: 'interaction',
+      steps: [
+        { type: 'model_output', content: [{ type: 'image', data: PNG.toString('base64'), mime_type: 'image/png' }] },
+      ],
+    };
+    assert.deepEqual(extractImage(payload), PNG);
+  });
+
+  test('con più step tiene l\'ultima immagine prodotta', () => {
+    const vecchia = Buffer.from('vecchia');
+    const payload = {
+      steps: [
+        { content: [{ type: 'image', data: vecchia.toString('base64') }] },
+        { content: [{ type: 'text', text: 'rifinisco' }, { type: 'image', data: PNG.toString('base64') }] },
+      ],
+    };
+    assert.deepEqual(extractImage(payload), PNG);
+  });
+
+  test('non confonde un blocco di testo con un\'immagine', () => {
+    const payload = { steps: [{ content: [{ type: 'text', text: 'bloccato dalla policy' }] }] };
+    assert.equal(extractImage(payload), null);
+  });
+
   test('legge la forma a lista output[]', () => {
     assert.deepEqual(extractImage({ output: [{ type: 'image', data: PNG.toString('base64') }] }), PNG);
   });

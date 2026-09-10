@@ -64,17 +64,26 @@ async function toImagePart(filePath) {
 
 /**
  * Estrae l'immagine dalla risposta.
- * La forma documentata è `output_image.data`, ma teniamo un paio di fallback
- * sulle forme usate dagli altri endpoint Gemini: se cambia il wrapper non
- * vogliamo perdere un'immagine già pagata.
+ * `output_image.data` è la scorciatoia comoda, ma l'immagine sta anche nei
+ * blocchi di `steps[].content[]`: se la scorciatoia non c'è la peschiamo da lì,
+ * così non perdiamo un'immagine già pagata.
  */
 export function extractImage(payload) {
   const direct = payload?.output_image?.data;
   if (typeof direct === 'string' && direct) return Buffer.from(direct, 'base64');
 
-  const fromOutput = (Array.isArray(payload?.output) ? payload.output : []).find(
-    (item) => item?.type === 'image' && typeof item?.data === 'string' && item.data
-  );
+  const isImageBlock = (item) =>
+    item?.type === 'image' && typeof item?.data === 'string' && item.data;
+
+  // Forma canonica della Interactions API: l'ultima immagine prodotta vince.
+  const steps = Array.isArray(payload?.steps) ? payload.steps : [];
+  const fromSteps = steps
+    .flatMap((step) => (Array.isArray(step?.content) ? step.content : []))
+    .filter(isImageBlock)
+    .pop();
+  if (fromSteps) return Buffer.from(fromSteps.data, 'base64');
+
+  const fromOutput = (Array.isArray(payload?.output) ? payload.output : []).find(isImageBlock);
   if (fromOutput) return Buffer.from(fromOutput.data, 'base64');
 
   const parts = payload?.candidates?.[0]?.content?.parts ?? [];
