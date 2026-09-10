@@ -171,8 +171,12 @@ async function oauthTokenRequest(params, label) {
   return toStoredTokens(payload);
 }
 
-/** Scambia l'authorization code con access + refresh token (usato da auth.js). */
-export async function exchangeCodeForTokens(code) {
+/**
+ * Scambia l'authorization code con access + refresh token (usato da auth.js).
+ * @param {string} code
+ * @param {string} [codeVerifier] richiesto se l'authorize è partito con PKCE
+ */
+export async function exchangeCodeForTokens(code, codeVerifier) {
   return oauthTokenRequest(
     {
       client_key: requireEnv('TIKTOK_CLIENT_KEY'),
@@ -180,6 +184,7 @@ export async function exchangeCodeForTokens(code) {
       code,
       grant_type: 'authorization_code',
       redirect_uri: config.tiktok.redirectUri,
+      ...(codeVerifier ? { code_verifier: codeVerifier } : {}),
     },
     'scambio del code'
   );

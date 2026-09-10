@@ -7,18 +7,36 @@
  */
 import http from 'node:http';
 import crypto from 'node:crypto';
+import { pathToFileURL } from 'node:url';
 import { config, requireEnv } from '../config.js';
 import { exchangeCodeForTokens, saveTokens } from './tiktok.js';
 
 const AUTHORIZE_URL = 'https://www.tiktok.com/v2/auth/authorize/';
 
-function buildAuthorizeUrl(clientKey, state) {
+/**
+ * Coppia PKCE.
+ * Il verifier usa solo caratteri "unreserved" (qui esadecimali) ed è lungo 64,
+ * dentro i 43-128 richiesti. Il challenge è lo SHA256 in ESADECIMALE: TikTok si
+ * discosta dallo standard OAuth, che vorrebbe base64url. Con base64url
+ * l'authorize fallisce.
+ */
+export function createPkcePair() {
+  const codeVerifier = crypto.randomBytes(32).toString('hex');
+  const codeChallenge = crypto.createHash('sha256').update(codeVerifier).digest('hex');
+  return { codeVerifier, codeChallenge };
+}
+
+export function buildAuthorizeUrl(clientKey, state, codeChallenge) {
   const url = new URL(AUTHORIZE_URL);
   url.searchParams.set('client_key', clientKey);
   url.searchParams.set('scope', config.tiktok.scopes.join(','));
   url.searchParams.set('response_type', 'code');
   url.searchParams.set('redirect_uri', config.tiktok.redirectUri);
   url.searchParams.set('state', state);
+  if (codeChallenge) {
+    url.searchParams.set('code_challenge', codeChallenge);
+    url.searchParams.set('code_challenge_method', 'S256');
+  }
   return url.toString();
 }
 
@@ -105,16 +123,24 @@ async function main() {
   requireEnv('TIKTOK_CLIENT_SECRET');
 
   const state = crypto.randomBytes(16).toString('hex');
-  const authorizeUrl = buildAuthorizeUrl(clientKey, state);
+  const { codeVerifier, codeChallenge } = config.tiktok.usePkce
+    ? createPkcePair()
+    : { codeVerifier: undefined, codeChallenge: undefined };
+  const authorizeUrl = buildAuthorizeUrl(clientKey, state, codeChallenge);
 
   console.log('\nApri questo link nel browser e autorizza l\'app:\n');
   console.log(`  ${authorizeUrl}\n`);
-  console.log('(La redirect URI deve combaciare esattamente con quella registrata nella app TikTok.)\n');
+  console.log('(La redirect URI deve combaciare esattamente con quella registrata nella app TikTok.)');
+  console.log(
+    config.tiktok.usePkce
+      ? 'PKCE attivo. Se TikTok rifiuta con un errore su code_challenge, metti TIKTOK_PKCE=false nel .env.\n'
+      : 'PKCE disattivato. Se TikTok chiede "code_challenge", togli TIKTOK_PKCE=false dal .env.\n'
+  );
 
   const code = await waitForCallback(state);
   console.log('Code ricevuto, lo scambio con i token...');
 
-  const tokens = await exchangeCodeForTokens(code);
+  const tokens = await exchangeCodeForTokens(code, codeVerifier);
   await saveTokens(tokens);
 
   console.log(`\nFatto. Token salvati in ${config.paths.tokensFile}`);
@@ -124,7 +150,10 @@ async function main() {
   console.log('\nIl refresh token dura circa un anno e viene rinnovato automaticamente a ogni post.');
 }
 
-main().catch((err) => {
-  console.error(`\nErrore: ${err.message}`);
-  process.exit(1);
-});
+// Esegue solo se lanciato direttamente: importarlo non apre nessun server.
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+  main().catch((err) => {
+    console.error(`\nErrore: ${err.message}`);
+    process.exit(1);
+  });
+}

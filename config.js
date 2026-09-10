@@ -45,6 +45,10 @@ export const config = {
     scopes: ['user.info.basic', 'video.publish'],
     redirectUri: process.env.TIKTOK_REDIRECT_URI || 'http://localhost:5173/callback',
     authPort: Number(process.env.AUTH_PORT || 5173),
+    // PKCE: obbligatorio per le app registrate come Desktop/iOS/Android, innocuo
+    // per quelle Web. Se l'authorize fallisce con "code_challenge", serve questo.
+    // Attenzione: TikTok vuole lo SHA256 in ESADECIMALE, non in base64url.
+    usePkce: process.env.TIKTOK_PKCE !== 'false',
     // App non auditata: il video atterra comunque privato, qualunque valore inviamo.
     // Con l'audit approvato basta cambiare questo in 'PUBLIC_TO_EVERYONE'.
     privacyLevel: 'SELF_ONLY',

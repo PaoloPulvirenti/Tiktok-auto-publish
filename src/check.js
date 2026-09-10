@@ -69,7 +69,7 @@ async function checkReferences() {
       const usate = new Set(history.filter((entry) => entry.photo).map((entry) => entry.photo));
       const rimaste = photos.filter((file) => !usate.has(path.basename(file))).length;
       if (rimaste === 0) warn('tutte già pubblicate: il giro riparte dalla meno recente');
-      else ok(`${rimaste} mai pubblicate: ${rimaste} giorni prima di ripetersi`);
+      else ok(`${rimaste} mai pubblicate: ${rimaste === 1 ? '1 giorno' : `${rimaste} giorni`} prima di ripetersi`);
     } catch (err) {
       bad(err.message);
     }
