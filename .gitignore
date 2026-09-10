@@ -5,8 +5,5 @@ tokens.json
 # log del cron
 *.log
 
-# video: la coda e l'archivio restano locali
-videos/queue/*
-videos/posted/*
-!videos/queue/.gitkeep
-!videos/posted/.gitkeep
+# scratch di lavoro: immagini e video generati a ogni run
+output/

@@ -1,103 +1,33 @@
 #!/usr/bin/env node
 /**
  * Orchestratore del post giornaliero:
- *   coda -> brief -> caption (Anthropic) -> post TikTok (SELF_ONLY) -> archivio
+ *   storico -> idea (Claude) -> immagine (Gemini) -> slideshow (ffmpeg)
+ *   -> caption (Claude) -> post TikTok (SELF_ONLY, is_aigc) -> storico
  *
  *   npm run post
- *   npm run post -- --dry-run   (genera la caption e mostra cosa farebbe, senza pubblicare)
+ *   npm run post -- --dry-run   (fa tutto tranne la pubblicazione)
  */
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { config } from '../config.js';
-import { generateCaption } from './anthropic.js';
+import { generateCaption, generateIdea } from './anthropic.js';
+import { generateImage, listReferences } from './gemini.js';
+import { renderSlideshow } from './slideshow.js';
+import { appendEntry, recentNames } from './state.js';
 import { assertUploadable, buildInitBody, publishVideo } from './tiktok.js';
 
-/** Elenca i video in coda, già ordinati secondo config.video.order. */
-export async function listQueue() {
-  let entries;
-  try {
-    entries = await fs.readdir(config.paths.queueDir, { withFileTypes: true });
-  } catch (cause) {
-    if (cause.code === 'ENOENT') {
-      throw new Error(`La cartella della coda non esiste: ${config.paths.queueDir}`);
-    }
-    throw cause;
-  }
-
-  const videos = entries
-    .filter((entry) => entry.isFile() && !entry.name.startsWith('.'))
-    .filter((entry) => config.video.extensions.includes(path.extname(entry.name).toLowerCase()))
-    .map((entry) => path.join(config.paths.queueDir, entry.name));
-
-  if (config.video.order === 'mtime') {
-    const withTimes = await Promise.all(
-      videos.map(async (filePath) => ({ filePath, mtime: (await fs.stat(filePath)).mtimeMs }))
-    );
-    withTimes.sort((a, b) => a.mtime - b.mtime || a.filePath.localeCompare(b.filePath));
-    return withTimes.map((item) => item.filePath);
-  }
-
-  return videos.sort((a, b) => a.localeCompare(b));
-}
-
-/** Legge il brief dal sidecar .txt con lo stesso nome del video, o usa il default. */
-export async function readBrief(videoPath) {
-  const sidecar = videoPath.replace(/\.[^.]+$/, '.txt');
-  try {
-    const text = (await fs.readFile(sidecar, 'utf8')).trim();
-    if (text) {
-      return { brief: text, source: path.basename(sidecar), sidecar };
-    }
-    console.log(`${path.basename(sidecar)} è vuoto: uso il brief di default.`);
-  } catch (cause) {
-    if (cause.code !== 'ENOENT') throw cause;
-  }
-  return { brief: config.defaultBrief, source: 'defaultBrief (config.js)', sidecar };
-}
-
-/** Sposta un file gestendo anche i filesystem diversi (EXDEV) e le collisioni. */
-export async function moveFile(from, to) {
-  let target = to;
-  try {
-    await fs.access(target);
-    // Destinazione già occupata: aggiungo un suffisso temporale invece di sovrascrivere.
-    const ext = path.extname(target);
-    const stamp = new Date().toISOString().replace(/[:.]/g, '-');
-    target = `${target.slice(0, target.length - ext.length)}-${stamp}${ext}`;
-  } catch {
-    // non esiste: ok così
-  }
-
-  try {
-    await fs.rename(from, target);
-  } catch (cause) {
-    if (cause.code !== 'EXDEV') throw cause;
-    await fs.copyFile(from, target);
-    await fs.unlink(from);
-  }
-  return target;
-}
-
-export async function archive(videoPath, sidecarPath, caption) {
-  await fs.mkdir(config.paths.postedDir, { recursive: true });
-
-  const destination = path.join(config.paths.postedDir, path.basename(videoPath));
-  const moved = await moveFile(videoPath, destination);
-
-  // Porto con me anche il brief, se c'era.
-  try {
-    await fs.access(sidecarPath);
-    await moveFile(sidecarPath, path.join(config.paths.postedDir, path.basename(sidecarPath)));
-  } catch {
-    // nessun sidecar da archiviare
-  }
-
-  // Traccia della caption effettivamente usata, accanto al video archiviato.
-  const captionFile = `${moved.slice(0, moved.length - path.extname(moved).length)}.caption.txt`;
-  await fs.writeFile(captionFile, `${caption}\n`);
-
-  return moved;
+/** Nome file leggibile: 2026-09-09-borsa-rafia-mare */
+export function baseNameFor(idea, date = new Date()) {
+  const day = date.toISOString().slice(0, 10);
+  const slug = idea.name
+    .toLowerCase()
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-|-$/g, '')
+    .slice(0, 40);
+  return slug ? `${day}-${slug}` : day;
 }
 
 /** Riconosce i flag da riga di comando, rifiutando quelli sconosciuti. */
@@ -113,54 +43,81 @@ export function parseArgs(argv) {
   return options;
 }
 
-export async function main(argv = process.argv.slice(2)) {
+export async function main(argv = process.argv.slice(2), { run } = {}) {
   const { dryRun } = parseArgs(argv);
-  if (dryRun) console.log('--- DRY RUN: nessuna chiamata a TikTok, niente viene archiviato ---');
+  if (dryRun) console.log('--- DRY RUN: nessuna chiamata a TikTok, niente viene salvato nello storico ---');
 
-  const queue = await listQueue();
+  const references = await listReferences();
+  console.log(
+    `Riferimenti (${references.length}): ${references.map((file) => path.basename(file)).join(', ')}`
+  );
 
-  if (queue.length === 0) {
-    console.log(`Coda vuota (${config.paths.queueDir}): niente da pubblicare oggi.`);
-    return;
+  const recent = await recentNames();
+  console.log(`Modelli già pubblicati: ${recent.length}`);
+
+  const idea = await generateIdea(recent);
+  console.log(`\nModello di oggi: ${idea.name}`);
+  console.log(`  ${idea.description}`);
+  console.log(`  prompt: ${idea.imagePrompt}`);
+
+  const count = Math.max(1, config.product.imagesPerPost);
+  const images = [];
+  for (let index = 0; index < count; index += 1) {
+    console.log(`\nGenero l'immagine ${index + 1}/${count} con ${config.gemini.model}...`);
+    const image = await generateImage(idea.imagePrompt, references);
+    console.log(`  ${(image.length / 1024).toFixed(0)} KB`);
+    images.push(image);
   }
 
-  const videoPath = queue[0];
-  const fileName = path.basename(videoPath);
-  console.log(`Video in coda: ${queue.length}. Pubblico: ${fileName}`);
+  const baseName = baseNameFor(idea);
+  console.log('\nMonto il video verticale...');
+  const { videoPath, imagePaths, size } = await renderSlideshow(images, baseName, run ? { run } : {});
+  console.log(`  ${videoPath} (${(size / 1024 / 1024).toFixed(1)} MB)`);
+  assertUploadable(size, path.basename(videoPath));
 
-  const { brief, source, sidecar } = await readBrief(videoPath);
-  console.log(`Brief da: ${source}`);
-
-  const caption = await generateCaption(brief, { fileName });
-  console.log(`Caption (${caption.length} caratteri): ${caption}`);
+  const caption = await generateCaption(idea);
+  console.log(`\nCaption (${caption.length} caratteri): ${caption}`);
 
   if (dryRun) {
-    const { size } = await fs.stat(videoPath);
-    // Stessa validazione del post vero: un file troppo grande fallisce già qui.
-    assertUploadable(size, fileName);
-    console.log(`\nBody che verrebbe inviato a video/init:`);
+    console.log('\nBody che verrebbe inviato a video/init:');
     console.log(JSON.stringify(buildInitBody({ title: caption, videoSize: size }), null, 2));
-    console.log(`\nIl video resta in ${config.paths.queueDir}. Nessun post consumato.`);
-    return;
+    console.log(`\nImmagine: ${imagePaths.join(', ')}`);
+    console.log(`Video:    ${videoPath}`);
+    console.log('Nessun post consumato.');
+    return { idea, caption, videoPath, imagePaths, dryRun: true };
   }
 
   const { publishId, status } = await publishVideo({ filePath: videoPath, title: caption });
   console.log(`Pubblicato: ${status} (publish_id=${publishId})`);
 
-  const archived = await archive(videoPath, sidecar, caption);
-  console.log(`Archiviato in: ${archived}`);
+  await appendEntry({
+    name: idea.name,
+    description: idea.description,
+    imagePrompt: idea.imagePrompt,
+    caption,
+    model: config.gemini.model,
+    publishId,
+    status,
+  });
+  console.log(`Storico aggiornato: ${config.paths.historyFile}`);
 
   console.log(
     '\nIl video è su TikTok come PRIVATO. Aprilo nell\'app e cambia la visibilità in ' +
       '"Tutti" per renderlo pubblico.'
   );
+  return { idea, caption, videoPath, imagePaths, publishId, status };
 }
 
 // Esegue solo se lanciato direttamente: importarlo (test inclusi) non pubblica nulla.
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
-  main().catch((err) => {
+  main().catch(async (err) => {
     console.error(`\nErrore: ${err.message}`);
     if (process.env.DEBUG) console.error(err);
+    // Lasciamo in giro quello che è già stato generato: l'immagine è già pagata.
+    await fs.access(config.paths.outputDir).then(
+      () => console.error(`Materiale generato (se c'è) in: ${config.paths.outputDir}`),
+      () => {}
+    );
     process.exit(1);
   });
 }

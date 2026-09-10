@@ -8,6 +8,7 @@ import {
   assertUploadable,
   buildInitBody,
   getAccessToken,
+  loadTokens,
   initVideoUpload,
   publishVideo,
   saveTokens,
@@ -53,6 +54,7 @@ describe('buildInitBody', () => {
         disable_comment: false,
         disable_duet: false,
         disable_stitch: false,
+        is_aigc: true,
       },
       source_info: {
         source: 'FILE_UPLOAD',
@@ -61,6 +63,13 @@ describe('buildInitBody', () => {
         total_chunk_count: 1,
       },
     });
+  });
+
+  test('dichiara il contenuto come generato da IA', () => {
+    // Le immagini sono generate: TikTok richiede la dichiarazione sui
+    // contenuti realistici, e senza il flag il post è a rischio rimozione.
+    assert.equal(buildInitBody({ title: 't', videoSize: 1 }).post_info.is_aigc, true);
+    assert.equal(config.tiktok.isAigc, true);
   });
 
   test('chunk_size coincide sempre con video_size', () => {
@@ -300,5 +309,46 @@ describe('publishVideo (flusso completo)', () => {
     const err = await rejects(() => publishVideo({ filePath: videoPath, title: 't' }));
     assert.match(err.message, /supera il limite/);
     assert.equal(active.calls.length, 0);
+  });
+});
+
+describe('token da variabile d\'ambiente (GitHub Actions)', () => {
+  const saved = process.env.TIKTOK_TOKENS;
+
+  afterEach(() => {
+    if (saved === undefined) delete process.env.TIKTOK_TOKENS;
+    else process.env.TIKTOK_TOKENS = saved;
+  });
+
+  test('TIKTOK_TOKENS ha la precedenza sul file', async () => {
+    await writeTokens(Date.now() + 3600_000);
+    process.env.TIKTOK_TOKENS = JSON.stringify({
+      access_token: 'DA-SECRET',
+      refresh_token: 'RT',
+      expires_at: Date.now() + 3600_000,
+    });
+
+    const tokens = await loadTokens();
+    assert.equal(tokens.access_token, 'DA-SECRET');
+  });
+
+  test('una variabile vuota non nasconde il file', async () => {
+    await writeTokens(Date.now() + 3600_000);
+    process.env.TIKTOK_TOKENS = '   ';
+    assert.equal((await loadTokens()).access_token, 'AT');
+  });
+
+  test('errore parlante se il secret non è un JSON valido', async () => {
+    process.env.TIKTOK_TOKENS = 'non-json';
+    const err = await rejects(() => loadTokens());
+    assert.match(err.message, /non sono un JSON valido/);
+    assert.match(err.message, /TIKTOK_TOKENS/);
+  });
+
+  test('errore parlante se il secret è incompleto', async () => {
+    process.env.TIKTOK_TOKENS = JSON.stringify({ access_token: 'solo-questo' });
+    const err = await rejects(() => loadTokens());
+    assert.match(err.message, /incompleti/);
+    assert.match(err.message, /TIKTOK_TOKENS/);
   });
 });

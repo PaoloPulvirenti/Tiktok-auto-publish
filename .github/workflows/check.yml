@@ -1,0 +1,49 @@
+name: check
+
+# Diagnostica su richiesta: env, ffmpeg, riferimenti, token e permessi TikTok.
+# Non genera immagini e non pubblica niente, quindi non spende.
+on:
+  workflow_dispatch:
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+
+      - run: npm ci
+
+      - name: npm run check
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          TIKTOK_CLIENT_KEY: ${{ secrets.TIKTOK_CLIENT_KEY }}
+          TIKTOK_CLIENT_SECRET: ${{ secrets.TIKTOK_CLIENT_SECRET }}
+          TIKTOK_TOKENS: ${{ secrets.TIKTOK_TOKENS }}
+        run: npm run check
+
+      # Il refresh del token può scattare anche durante il check: se è successo,
+      # il secret va aggiornato o il refresh token vecchio resta orfano.
+      - name: Aggiorna il secret dei token se sono stati rinnovati
+        if: always()
+        env:
+          GH_TOKEN: ${{ secrets.GH_PAT }}
+        run: |
+          if [ ! -f tokens.json ]; then
+            echo "Nessun refresh: secret invariato."
+            exit 0
+          fi
+          if [ -z "$GH_TOKEN" ]; then
+            echo "::error::I token sono stati rinnovati ma manca il secret GH_PAT:" \
+                 "TIKTOK_TOKENS non è stato aggiornato e il prossimo run userà un refresh token vecchio."
+            exit 1
+          fi
+          gh secret set TIKTOK_TOKENS --repo "$GITHUB_REPOSITORY" < tokens.json
+          echo "Secret TIKTOK_TOKENS aggiornato."

@@ -1,14 +1,17 @@
 #!/usr/bin/env node
 /**
- * Diagnostica: verifica env, token e permessi TikTok SENZA pubblicare niente.
+ * Diagnostica: verifica env, token, ffmpeg, riferimenti e permessi TikTok
+ * SENZA generare né pubblicare niente (quindi senza spendere).
  *
  *   npm run check
  */
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { config } from '../config.js';
+import { listReferences } from './gemini.js';
+import { runFfmpeg } from './slideshow.js';
+import { readHistory, recentNames } from './state.js';
 import { getAccessToken, loadTokens, queryCreatorInfo } from './tiktok.js';
-import { listQueue, readBrief } from './index.js';
 
 let failed = false;
 
@@ -25,16 +28,47 @@ function section(title) {
 
 async function checkEnv() {
   section('1. Variabili d\'ambiente (.env)');
-  for (const name of ['ANTHROPIC_API_KEY', 'TIKTOK_CLIENT_KEY', 'TIKTOK_CLIENT_SECRET']) {
+  for (const name of [
+    'ANTHROPIC_API_KEY',
+    'GEMINI_API_KEY',
+    'TIKTOK_CLIENT_KEY',
+    'TIKTOK_CLIENT_SECRET',
+  ]) {
     if (process.env[name]) ok(`${name} presente`);
     else bad(`${name} mancante — copia .env.example in .env e compilalo`);
   }
-  ok(`Modello Anthropic: ${config.anthropic.model}`);
+  ok(`Modello testo: ${config.anthropic.model}`);
+  ok(`Modello immagine: ${config.gemini.model} (${config.gemini.imageSize}, ${config.gemini.aspectRatio})`);
   ok(`Redirect URI: ${config.tiktok.redirectUri}`);
 }
 
+async function checkFfmpeg() {
+  section('2. ffmpeg (montaggio del video)');
+  try {
+    await runFfmpeg(['-hide_banner', '-loglevel', 'error', '-version']);
+    ok(`ffmpeg utilizzabile (${config.slideshow.ffmpegPath})`);
+  } catch (err) {
+    bad(err.message);
+  }
+}
+
+async function checkReferences() {
+  section('3. Foto di riferimento');
+  try {
+    const references = await listReferences();
+    ok(`${references.length} riferimenti: ${references.map((file) => path.basename(file)).join(', ')}`);
+    if (references.length < config.gemini.maxReferenceImages) {
+      warn(
+        `il modello ne accetta fino a ${config.gemini.maxReferenceImages}: più foto tue = borse più simili alle tue`
+      );
+    }
+  } catch (err) {
+    bad(err.message);
+  }
+}
+
 async function checkTokens() {
-  section('2. Token TikTok (tokens.json)');
+  section('4. Token TikTok');
   let tokens;
   try {
     tokens = await loadTokens();
@@ -43,7 +77,7 @@ async function checkTokens() {
     return null;
   }
 
-  ok(`tokens.json trovato (open_id: ${tokens.open_id ?? 'non salvato'})`);
+  ok(`token caricati (open_id: ${tokens.open_id ?? 'non salvato'})`);
 
   const scopes = String(tokens.scope || '')
     .split(/[,\s]+/)
@@ -68,7 +102,7 @@ async function checkTokens() {
 }
 
 async function checkApi() {
-  section('3. Chiamata reale a TikTok (creator_info, nessuna pubblicazione)');
+  section('5. Chiamata reale a TikTok (creator_info, nessuna pubblicazione)');
   let accessToken;
   try {
     accessToken = await getAccessToken();
@@ -81,9 +115,6 @@ async function checkApi() {
   try {
     const info = await queryCreatorInfo(accessToken);
     ok(`account: ${info.creator_nickname || info.creator_username || 'sconosciuto'}`);
-    if (typeof info.max_video_post_duration_sec === 'number') {
-      ok(`durata massima video: ${info.max_video_post_duration_sec}s`);
-    }
     const options = info.privacy_level_options || [];
     ok(`privacy_level_options: ${options.join(', ') || '(nessuna)'}`);
     if (options.includes('PUBLIC_TO_EVERYONE')) {
@@ -100,54 +131,41 @@ async function checkApi() {
   }
 }
 
-async function checkQueue() {
-  section('4. Coda video');
-  let queue;
+async function checkHistory() {
+  section('6. Storico');
   try {
-    queue = await listQueue();
+    const history = await readHistory();
+    if (history.length === 0) {
+      warn(`storico vuoto (${config.paths.historyFile}): il primo post è ancora da fare`);
+      return;
+    }
+    const recent = await recentNames(5);
+    ok(`${history.length} post nello storico`);
+    ok(`ultimi modelli: ${recent.join(', ')}`);
+    ok(`is_aigc: ${config.tiktok.isAigc ? 'sì (dichiarato)' : 'NO'}`);
   } catch (err) {
     bad(err.message);
-    return;
   }
-
-  if (queue.length === 0) {
-    warn(`nessun video in ${config.paths.queueDir} — il prossimo run non farà nulla`);
-    return;
-  }
-
-  ok(`${queue.length} video in coda (ordine: ${config.video.order})`);
-  const next = queue[0];
-  const { size } = await fs.stat(next);
-  const mb = (size / 1024 / 1024).toFixed(1);
-
-  if (size === 0) bad(`il prossimo video (${path.basename(next)}) è vuoto`);
-  else if (size > config.tiktok.maxSingleChunkBytes) {
-    bad(
-      `il prossimo video (${path.basename(next)}) pesa ${mb} MB e supera il limite di ` +
-        `${(config.tiktok.maxSingleChunkBytes / 1024 / 1024).toFixed(0)} MB per l'upload single-chunk`
-    );
-  } else ok(`prossimo: ${path.basename(next)} (${mb} MB)`);
-
-  const { source } = await readBrief(next);
-  ok(`brief: ${source}`);
 }
 
 async function main() {
-  console.log('Controllo della configurazione (nessun video verrà pubblicato)');
+  console.log('Controllo della configurazione (niente viene generato né pubblicato)');
   await checkEnv();
+  await checkFfmpeg();
+  await checkReferences();
   const tokens = await checkTokens();
   if (tokens) {
     await checkApi();
   } else {
-    section('3. Chiamata reale a TikTok');
+    section('5. Chiamata reale a TikTok');
     warn('saltata: prima esegui "npm run auth"');
   }
-  await checkQueue();
+  await checkHistory();
 
   console.log(
     failed
       ? '\nCi sono problemi da sistemare (vedi le righe FAIL).'
-      : '\nTutto a posto. Prova "npm run post -- --dry-run" per vedere la caption senza pubblicare.'
+      : '\nTutto a posto. Prova "npm run post -- --dry-run": genera immagine, video e caption senza pubblicare.'
   );
   process.exit(failed ? 1 : 0);
 }

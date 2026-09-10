@@ -1,0 +1,31 @@
+name: test
+
+on:
+  push:
+    branches: ['**']
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+
+      - run: npm ci
+
+      # API mockate: nessuna credenziale, nessuna rete, nessun post.
+      - name: Suite di test
+        run: npm test
+
+      # ffmpeg qui c'è davvero: verifichiamo che il comando montato in
+      # src/slideshow.js produca un mp4 1080x1920 della durata attesa.
+      - name: Smoke test del montaggio video
+        run: node scripts/ffmpeg-smoke.mjs

@@ -71,26 +71,37 @@ async function apiPost(endpoint, body, accessToken, label) {
 
 export async function loadTokens() {
   let raw;
-  try {
-    raw = await fs.readFile(config.paths.tokensFile, 'utf8');
-  } catch (cause) {
-    if (cause.code === 'ENOENT') {
-      throw new Error(
-        `tokens.json non trovato in ${config.paths.tokensFile}. Esegui prima "npm run auth".`
-      );
+  let origin;
+
+  // Su GitHub Actions il filesystem è effimero: i token arrivano da un secret.
+  if (process.env.TIKTOK_TOKENS && process.env.TIKTOK_TOKENS.trim()) {
+    raw = process.env.TIKTOK_TOKENS;
+    origin = 'la variabile TIKTOK_TOKENS';
+  } else {
+    origin = `il file ${config.paths.tokensFile}`;
+    try {
+      raw = await fs.readFile(config.paths.tokensFile, 'utf8');
+    } catch (cause) {
+      if (cause.code === 'ENOENT') {
+        throw new Error(
+          `tokens.json non trovato in ${config.paths.tokensFile}. Esegui prima "npm run auth".`
+        );
+      }
+      throw cause;
     }
-    throw cause;
   }
 
   let tokens;
   try {
     tokens = JSON.parse(raw);
   } catch {
-    throw new Error(`tokens.json non è un JSON valido (${config.paths.tokensFile}). Rilancia "npm run auth".`);
+    throw new Error(`I token non sono un JSON valido (${origin}). Rilancia "npm run auth".`);
   }
 
   if (!tokens.access_token || !tokens.refresh_token) {
-    throw new Error('tokens.json è incompleto (manca access_token o refresh_token). Rilancia "npm run auth".');
+    throw new Error(
+      `I token sono incompleti (manca access_token o refresh_token) in ${origin}. Rilancia "npm run auth".`
+    );
   }
   return tokens;
 }
@@ -228,6 +239,9 @@ export function buildInitBody({ title, videoSize }) {
       disable_comment: false,
       disable_duet: false,
       disable_stitch: false,
+      // Immagini generate da IA: TikTok richiede la dichiarazione e applica
+      // il tag "AI-generated" nella descrizione del post.
+      is_aigc: config.tiktok.isAigc,
     },
     source_info: {
       source: 'FILE_UPLOAD',

@@ -1,0 +1,100 @@
+name: post
+
+on:
+  schedule:
+    # 07:00 UTC = 9:00 in Italia con l'ora legale, 8:00 con quella solare.
+    # GitHub interpreta il cron solo in UTC: se vuoi le 9 tutto l'anno,
+    # tieni due righe e commenta quella fuori stagione.
+    - cron: '0 7 * * *'
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'Genera immagine, video e caption senza pubblicare'
+        type: boolean
+        default: false
+
+# Un post alla volta: due run sovrapposti pubblicherebbero due video
+# e brucerebbero due volte i token.
+concurrency:
+  group: tiktok-post
+  cancel-in-progress: false
+
+jobs:
+  post:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      # Serve per committare history/posted.jsonl.
+      contents: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+
+      - run: npm ci
+
+      - name: Genera e pubblica
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          TIKTOK_CLIENT_KEY: ${{ secrets.TIKTOK_CLIENT_KEY }}
+          TIKTOK_CLIENT_SECRET: ${{ secrets.TIKTOK_CLIENT_SECRET }}
+          TIKTOK_TOKENS: ${{ secrets.TIKTOK_TOKENS }}
+        run: |
+          if [ "${{ inputs.dry_run }}" = "true" ]; then
+            npm run post -- --dry-run
+          else
+            npm run post
+          fi
+
+      # TikTok ruota il refresh token a ogni rinnovo: se non riscriviamo il
+      # secret, al prossimo run ci troviamo con un token già speso.
+      # Il file esiste solo se un refresh è davvero avvenuto.
+      - name: Aggiorna il secret dei token se sono stati rinnovati
+        if: always()
+        env:
+          GH_TOKEN: ${{ secrets.GH_PAT }}
+        run: |
+          if [ ! -f tokens.json ]; then
+            echo "Nessun refresh in questo run: secret invariato."
+            exit 0
+          fi
+          if [ -z "$GH_TOKEN" ]; then
+            echo "::error::I token sono stati rinnovati ma manca il secret GH_PAT:" \
+                 "TIKTOK_TOKENS non è aggiornato e il prossimo run fallirà l'autenticazione."
+            exit 1
+          fi
+          gh secret set TIKTOK_TOKENS --repo "$GITHUB_REPOSITORY" < tokens.json
+          echo "Secret TIKTOK_TOKENS aggiornato."
+
+      # Lo storico serve a Claude per non riproporre le stesse borse: sul runner
+      # il filesystem è effimero, quindi va ricommittato.
+      # Il commit tiene anche vivo il cron, che GitHub disabilita dopo 60 giorni
+      # senza attività sul repo.
+      - name: Committa lo storico
+        if: success()
+        run: |
+          if [ -z "$(git status --porcelain -- history/)" ]; then
+            echo "Storico invariato (dry-run o nessun post)."
+            exit 0
+          fi
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add history/
+          git commit -m "post: $(date -u +%Y-%m-%d)"
+          git push
+
+      # L'immagine è già pagata: teniamola scaricabile anche se il post è andato
+      # storto, così non si perde e la puoi ripubblicare a mano.
+      - name: Salva immagine e video generati
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: post-${{ github.run_number }}
+          path: output/
+          retention-days: 30
+          if-no-files-found: ignore

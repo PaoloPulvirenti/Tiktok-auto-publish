@@ -1,16 +1,16 @@
 {
   "name": "tiktok-daily-poster",
   "version": "1.0.0",
-  "description": "Pubblica un video al giorno su TikTok in modo semi-automatico (caption via Anthropic, post SELF_ONLY via Content Posting API).",
+  "description": "Pubblica un post al giorno su TikTok: immagine del prodotto generata con Gemini, caption con Claude, upload via Content Posting API.",
   "type": "module",
   "engines": {
-    "node": ">=18"
+    "node": ">=22"
   },
   "scripts": {
     "auth": "node src/auth.js",
     "check": "node src/check.js",
     "post": "node src/index.js",
-    "test": "node --test test/*.test.js"
+    "test": "node --test \"test/**/*.test.js\""
   },
   "dependencies": {
     "dotenv": "^16.4.5"

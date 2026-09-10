@@ -21,8 +21,12 @@ export const config = {
   rootDir,
 
   paths: {
-    queueDir: path.join(rootDir, 'videos', 'queue'),
-    postedDir: path.join(rootDir, 'videos', 'posted'),
+    // Le tue foto reali: guidano la generazione (stile, filato, resa del punto).
+    referenceDir: path.join(rootDir, 'reference'),
+    // Scratch di lavoro: immagine e video del run corrente. Non versionato.
+    outputDir: path.join(rootDir, 'output'),
+    // Storico dei modelli già pubblicati, per non riproporre sempre la stessa borsa.
+    historyFile: path.join(rootDir, 'history', 'posted.jsonl'),
     tokensFile: path.join(rootDir, 'tokens.json'),
   },
 
@@ -34,6 +38,9 @@ export const config = {
     // App non auditata: il video atterra comunque privato, qualunque valore inviamo.
     // Con l'audit approvato basta cambiare questo in 'PUBLIC_TO_EVERYONE'.
     privacyLevel: 'SELF_ONLY',
+    // Contenuto generato da IA: TikTok richiede la dichiarazione sui contenuti
+    // realistici e applica il tag "AI-generated" nella descrizione.
+    isAigc: true,
     // Oltre questa soglia servirebbe l'upload multi-chunk (non implementato).
     maxSingleChunkBytes: 64 * 1024 * 1024,
     // Polling di status/fetch
@@ -47,27 +54,60 @@ export const config = {
     apiUrl: 'https://api.anthropic.com/v1/messages',
     version: '2023-06-01',
     model: process.env.ANTHROPIC_MODEL || 'claude-haiku-4-5-20251001',
-    maxTokens: 300,
+    maxTokens: 700,
   },
 
-  video: {
-    // Estensioni accettate nella coda.
-    extensions: ['.mp4', '.mov', '.webm'],
-    // Ordine con cui si svuota la coda:
-    //  'name'  -> alfabetico (con i file nominati 2026-09-10.mp4 = dal più vecchio)
-    //  'mtime' -> data di modifica del file, dal più vecchio
-    order: 'name',
+  gemini: {
+    // API "interactions": input multimodale, output immagine in base64.
+    apiUrl: 'https://generativelanguage.googleapis.com/v1beta/interactions',
+    // Nano Banana 2 Lite: generazione + editing, ~$0.034 per immagine 1K.
+    // Alternative: 'gemini-3.1-flash-image' (~$0.067), 'gemini-3-pro-image' (~$0.134).
+    model: process.env.GEMINI_MODEL || 'gemini-3.1-flash-lite-image',
+    // Verticale nativo: chiediamo il 9:16 al modello invece di ritagliare dopo.
+    aspectRatio: '9:16',
+    imageSize: '1K',
+    // Quante foto di riferimento allegare al massimo (le più recenti in reference/).
+    maxReferenceImages: 3,
+    referenceExtensions: ['.jpg', '.jpeg', '.png', '.webp'],
+  },
+
+  slideshow: {
+    // TikTok vuole il verticale pieno.
+    width: 1080,
+    height: 1920,
+    fps: 30,
+    durationSec: 8,
+    // Zoom lento (Ken Burns): da 1.0 a questo fattore nell'arco del video.
+    zoomTo: 1.12,
+    // Traccia audio silenziosa: un mp4 senza stream audio a volte fa storie
+    // in fase di elaborazione lato TikTok.
+    silentAudio: true,
+    ffmpegPath: process.env.FFMPEG_PATH || 'ffmpeg',
+  },
+
+  product: {
+    /**
+     * Che cosa vendi e come. Guida sia l'idea del modello sia la caption:
+     * è il posto giusto dove cambiare nicchia, materiali o tono.
+     */
+    brief:
+      'Borse fatte a mano all\'uncinetto, pezzi unici realizzati su ordinazione. ' +
+      'Filati di cotone e rafia, lavorazioni a punto basso, granny square, ' +
+      'trafori e frange. Estetica artigianale mediterranea, niente plastica, ' +
+      'niente logo. Il pubblico è femminile, 25-55 anni, cerca un accessorio ' +
+      'che non si trova nei negozi.',
+    // Invito all'azione: le borse non esistono ancora, si realizzano su richiesta.
+    callToAction: 'Scrivimi in DM se vuoi questo modello: lo realizzo su ordinazione.',
+    // Numero di immagini per post (1 = un solo modello, video statico con zoom).
+    imagesPerPost: 1,
+    // Quanti modelli recenti passare a Claude perché non si ripeta.
+    historyWindow: 30,
   },
 
   caption: {
     // TikTok tronca i titoli molto lunghi: teniamoci larghi ma prudenti.
     maxLength: 150,
   },
-
-  /** Brief usato quando il video non ha un sidecar .txt con lo stesso nome. */
-  defaultBrief:
-    'Video breve e verticale del mio canale. Scrivi una caption generica ma ' +
-    'accattivante, in italiano, che inviti a guardare fino alla fine.',
 };
 
 export default config;

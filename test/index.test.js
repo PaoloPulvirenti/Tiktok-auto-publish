@@ -4,29 +4,42 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import { config } from '../config.js';
 import { mockFetch, json, apiOk, tmpDir, captureLog, rejects } from './helpers.js';
-import { archive, listQueue, main, moveFile, parseArgs, readBrief } from '../src/index.js';
+import { baseNameFor, main, parseArgs } from '../src/index.js';
+import { readHistory } from '../src/state.js';
 
 process.env.ANTHROPIC_API_KEY = 'sk-test';
+process.env.GEMINI_API_KEY = 'AIza-test';
 process.env.TIKTOK_CLIENT_KEY = 'ck';
 process.env.TIKTOK_CLIENT_SECRET = 'cs';
+
+const IDEA = {
+  name: 'Sacca Granny Sole',
+  description: 'Sacca a granny square in cotone giallo con frange',
+  imagePrompt: 'product photo of a yellow granny square crochet bag',
+};
 
 let active;
 let workDir;
 const original = {
-  queueDir: config.paths.queueDir,
-  postedDir: config.paths.postedDir,
+  referenceDir: config.paths.referenceDir,
+  outputDir: config.paths.outputDir,
+  historyFile: config.paths.historyFile,
   tokensFile: config.paths.tokensFile,
-  order: config.video.order,
   interval: config.tiktok.statusPollIntervalMs,
+  imagesPerPost: config.product.imagesPerPost,
+  maxBytes: config.tiktok.maxSingleChunkBytes,
 };
 
 beforeEach(async () => {
   workDir = await tmpDir();
-  config.paths.queueDir = path.join(workDir, 'queue');
-  config.paths.postedDir = path.join(workDir, 'posted');
+  config.paths.referenceDir = path.join(workDir, 'reference');
+  config.paths.outputDir = path.join(workDir, 'output');
+  config.paths.historyFile = path.join(workDir, 'history', 'posted.jsonl');
   config.paths.tokensFile = path.join(workDir, 'tokens.json');
   config.tiktok.statusPollIntervalMs = 1;
-  await fs.mkdir(config.paths.queueDir, { recursive: true });
+
+  await fs.mkdir(config.paths.referenceDir, { recursive: true });
+  await fs.writeFile(path.join(config.paths.referenceDir, 'borsa.jpg'), 'jpeg-bytes');
   await fs.writeFile(
     config.paths.tokensFile,
     JSON.stringify({ access_token: 'AT', refresh_token: 'RT', expires_at: Date.now() + 3600_000 })
@@ -37,27 +50,52 @@ afterEach(async () => {
   active?.restore();
   active = undefined;
   Object.assign(config.paths, {
-    queueDir: original.queueDir,
-    postedDir: original.postedDir,
+    referenceDir: original.referenceDir,
+    outputDir: original.outputDir,
+    historyFile: original.historyFile,
     tokensFile: original.tokensFile,
   });
-  config.video.order = original.order;
   config.tiktok.statusPollIntervalMs = original.interval;
+  config.product.imagesPerPost = original.imagesPerPost;
+  config.tiktok.maxSingleChunkBytes = original.maxBytes;
   await fs.rm(workDir, { recursive: true, force: true });
 });
 
-const queueFile = (name, content = 'video-bytes') =>
-  fs.writeFile(path.join(config.paths.queueDir, name), content);
+/** ffmpeg finto: crea il file di destinazione con una dimensione plausibile. */
+const fakeRun = (bytes = 3 * 1024 * 1024) => async (args) =>
+  fs.writeFile(args[args.length - 1], Buffer.alloc(bytes));
 
-/** Mock del flusso TikTok completo + caption. */
-const happyPath = (caption = 'Caption generata #fyp') =>
-  mockFetch((url) => {
-    if (url.includes('anthropic')) return json({ type: 'message', content: [{ type: 'text', text: caption }] });
+const claudeReply = (text) => json({ type: 'message', content: [{ type: 'text', text }] });
+
+/**
+ * Mock dell'intera catena. Le due chiamate a Claude si distinguono dal system
+ * prompt: quella dell'idea chiede un JSON.
+ */
+const happyPath = ({ caption = 'Sacca gialla su ordinazione 🧶 #uncinetto', idea = IDEA } = {}) =>
+  mockFetch((url, init) => {
+    if (url.includes('anthropic')) {
+      const body = JSON.parse(init.body);
+      return /JSON/.test(body.system) ? claudeReply(JSON.stringify(idea)) : claudeReply(caption);
+    }
+    if (url.includes('generativelanguage')) {
+      return json({ output_image: { data: Buffer.from('png-bytes').toString('base64') } });
+    }
     if (url.includes('creator_info')) return apiOk({ creator_nickname: 'paolo' });
     if (url.includes('video/init')) return apiOk({ publish_id: 'P1', upload_url: 'https://up.example/1' });
     if (url.startsWith('https://up.example/')) return new Response('', { status: 201 });
     if (url.includes('status/fetch')) return apiOk({ status: 'PUBLISH_COMPLETE' });
     throw new Error(`URL non atteso: ${url}`);
+  });
+
+const urlsOf = (calls) =>
+  calls.map((call) => {
+    if (call.url.includes('anthropic')) return /JSON/.test(JSON.parse(call.body).system) ? 'idea' : 'caption';
+    if (call.url.includes('generativelanguage')) return 'immagine';
+    if (call.url.includes('creator_info')) return 'creator_info';
+    if (call.url.includes('video/init')) return 'init';
+    if (call.url.startsWith('https://up.example/')) return 'upload';
+    if (call.url.includes('status/fetch')) return 'status';
+    return call.url;
   });
 
 describe('parseArgs', () => {
@@ -75,173 +113,183 @@ describe('parseArgs', () => {
   });
 });
 
-describe('listQueue', () => {
-  test('ordina alfabeticamente e ignora i non-video', async () => {
-    await queueFile('2026-09-11.mp4');
-    await queueFile('2026-09-10.mp4');
-    await queueFile('note.txt');
-    await queueFile('.DS_Store');
-    const queue = await listQueue();
-    assert.deepEqual(queue.map((f) => path.basename(f)), ['2026-09-10.mp4', '2026-09-11.mp4']);
-  });
-
-  test('accetta .mov e .webm, maiuscole comprese', async () => {
-    await queueFile('a.MOV');
-    await queueFile('b.webm');
-    assert.equal((await listQueue()).length, 2);
-  });
-
-  test('con order=mtime prende prima il file più vecchio', async () => {
-    config.video.order = 'mtime';
-    await queueFile('zzz.mp4');
-    const old = path.join(config.paths.queueDir, 'zzz.mp4');
-    await fs.utimes(old, new Date(2020, 0, 1), new Date(2020, 0, 1));
-    await queueFile('aaa.mp4');
-    const queue = await listQueue();
-    assert.equal(path.basename(queue[0]), 'zzz.mp4');
-  });
-
-  test('coda vuota restituisce array vuoto', async () => {
-    assert.deepEqual(await listQueue(), []);
-  });
-
-  test('errore parlante se la cartella non esiste', async () => {
-    config.paths.queueDir = path.join(workDir, 'inesistente');
-    const err = await rejects(() => listQueue());
-    assert.match(err.message, /non esiste/);
-  });
-});
-
-describe('readBrief', () => {
-  test('usa il sidecar .txt con lo stesso nome', async () => {
-    await queueFile('clip.mp4');
-    await queueFile('clip.txt', '  Ricetta carbonara  ');
-    const { brief, source } = await readBrief(path.join(config.paths.queueDir, 'clip.mp4'));
-    assert.equal(brief, 'Ricetta carbonara');
-    assert.equal(source, 'clip.txt');
-  });
-
-  test('senza sidecar ricade sul brief di default', async () => {
-    await queueFile('clip.mp4');
-    const { brief, source } = await readBrief(path.join(config.paths.queueDir, 'clip.mp4'));
-    assert.equal(brief, config.defaultBrief);
-    assert.match(source, /defaultBrief/);
-  });
-
-  test('un sidecar vuoto non produce un brief vuoto', async () => {
-    await queueFile('clip.mp4');
-    await queueFile('clip.txt', '   \n  ');
-    let result;
-    const out = await captureLog(async () => {
-      result = await readBrief(path.join(config.paths.queueDir, 'clip.mp4'));
-    });
-    assert.equal(result.brief, config.defaultBrief);
-    assert.match(out, /è vuoto/);
-  });
-});
-
-describe('archiviazione', () => {
-  test('non sovrascrive un file già presente in posted', async () => {
-    await fs.mkdir(config.paths.postedDir, { recursive: true });
-    const existing = path.join(config.paths.postedDir, 'clip.mp4');
-    await fs.writeFile(existing, 'vecchio');
-    await queueFile('clip.mp4', 'nuovo');
-
-    const moved = await moveFile(path.join(config.paths.queueDir, 'clip.mp4'), existing);
-    assert.notEqual(moved, existing);
-    assert.equal(await fs.readFile(existing, 'utf8'), 'vecchio');
-    assert.equal(await fs.readFile(moved, 'utf8'), 'nuovo');
-  });
-
-  test('sposta video, brief e scrive la caption usata', async () => {
-    await queueFile('clip.mp4');
-    await queueFile('clip.txt', 'brief');
-    const videoPath = path.join(config.paths.queueDir, 'clip.mp4');
-    const sidecar = path.join(config.paths.queueDir, 'clip.txt');
-
-    await archive(videoPath, sidecar, 'La caption usata');
-
-    const posted = (await fs.readdir(config.paths.postedDir)).sort();
-    assert.deepEqual(posted, ['clip.caption.txt', 'clip.mp4', 'clip.txt']);
+describe('baseNameFor', () => {
+  test('data più slug del nome', () => {
     assert.equal(
-      await fs.readFile(path.join(config.paths.postedDir, 'clip.caption.txt'), 'utf8'),
-      'La caption usata\n'
+      baseNameFor({ name: 'Sacca Granny Sole' }, new Date('2026-09-09T08:00:00Z')),
+      '2026-09-09-sacca-granny-sole'
     );
-    assert.deepEqual(await fs.readdir(config.paths.queueDir), []);
+  });
+
+  test('toglie accenti e punteggiatura', () => {
+    assert.equal(
+      baseNameFor({ name: 'Borsa "Città" à mano!' }, new Date('2026-01-02T00:00:00Z')),
+      '2026-01-02-borsa-citta-a-mano'
+    );
+  });
+
+  test('un nome senza caratteri utili non produce un nome file rotto', () => {
+    assert.equal(baseNameFor({ name: '???' }, new Date('2026-01-02T00:00:00Z')), '2026-01-02');
   });
 });
 
 describe('main', () => {
-  test('coda vuota: esce senza chiamare nessuna API', async () => {
-    active = mockFetch(() => {
-      throw new Error('non deve chiamare la rete');
-    });
-    const out = await captureLog(() => main([]));
-    assert.match(out, /Coda vuota/);
-    assert.equal(active.calls.length, 0);
-  });
+  test('esegue la catena nell\'ordine giusto e pubblica', async () => {
+    active = happyPath();
+    const out = await captureLog(() => main([], { run: fakeRun() }));
 
-  test('pubblica il primo video e lo archivia', async () => {
-    await queueFile('2026-09-10.mp4');
-    await queueFile('2026-09-11.mp4');
-    active = happyPath('Caption del giorno #fyp');
-
-    const out = await captureLog(() => main([]));
-    assert.match(out, /Pubblico: 2026-09-10\.mp4/);
+    assert.deepEqual(urlsOf(active.calls), [
+      'idea',
+      'immagine',
+      'caption',
+      'creator_info',
+      'init',
+      'upload',
+      'status',
+    ]);
+    assert.match(out, /Modello di oggi: Sacca Granny Sole/);
     assert.match(out, /PUBLISH_COMPLETE/);
 
-    // solo il primo video viene consumato
-    assert.deepEqual(await fs.readdir(config.paths.queueDir), ['2026-09-11.mp4']);
-    assert.ok((await fs.readdir(config.paths.postedDir)).includes('2026-09-10.mp4'));
-
-    const initBody = JSON.parse(active.calls.find((c) => c.url.includes('video/init')).body);
-    assert.equal(initBody.post_info.title, 'Caption del giorno #fyp');
+    const initBody = JSON.parse(active.calls.find((call) => call.url.includes('video/init')).body);
+    assert.equal(initBody.post_info.title, 'Sacca gialla su ordinazione 🧶 #uncinetto');
+    assert.equal(initBody.post_info.is_aigc, true);
+    assert.equal(initBody.post_info.privacy_level, 'SELF_ONLY');
   });
 
-  test('--dry-run: genera la caption ma non tocca TikTok né la coda', async () => {
-    await queueFile('clip.mp4');
-    active = happyPath('Caption in prova #test');
+  test('genera l\'immagine col prompt dell\'idea e le foto di riferimento', async () => {
+    active = happyPath();
+    await captureLog(() => main([], { run: fakeRun() }));
 
-    const out = await captureLog(() => main(['--dry-run']));
+    const body = JSON.parse(active.calls.find((call) => call.url.includes('generativelanguage')).body);
+    assert.equal(body.input[0].text, IDEA.imagePrompt);
+    assert.equal(body.input[1].mime_type, 'image/jpeg');
+    assert.equal(Buffer.from(body.input[1].data, 'base64').toString(), 'jpeg-bytes');
+  });
+
+  test('scrive lo storico, così domani non ripropone la stessa borsa', async () => {
+    active = happyPath();
+    await captureLog(() => main([], { run: fakeRun() }));
+
+    const history = await readHistory();
+    assert.equal(history.length, 1);
+    assert.equal(history[0].name, IDEA.name);
+    assert.equal(history[0].imagePrompt, IDEA.imagePrompt);
+    assert.equal(history[0].publishId, 'P1');
+    assert.equal(history[0].status, 'PUBLISH_COMPLETE');
+    assert.equal(history[0].model, config.gemini.model);
+  });
+
+  test('passa a Claude i modelli già in storico', async () => {
+    await fs.mkdir(path.dirname(config.paths.historyFile), { recursive: true });
+    await fs.writeFile(
+      config.paths.historyFile,
+      `${JSON.stringify({ name: 'Borsa Mare' })}\n${JSON.stringify({ name: 'Sacca Rafia' })}\n`
+    );
+    active = happyPath();
+    await captureLog(() => main([], { run: fakeRun() }));
+
+    const ideaCall = active.calls.find(
+      (call) => call.url.includes('anthropic') && /JSON/.test(JSON.parse(call.body).system)
+    );
+    const prompt = JSON.parse(ideaCall.body).messages[0].content;
+    assert.match(prompt, /Borsa Mare/);
+    assert.match(prompt, /Sacca Rafia/);
+  });
+
+  test('imagesPerPost=2 genera due immagini', async () => {
+    config.product.imagesPerPost = 2;
+    active = happyPath();
+    await captureLog(() => main([], { run: fakeRun() }));
+
+    const imageCalls = active.calls.filter((call) => call.url.includes('generativelanguage'));
+    assert.equal(imageCalls.length, 2);
+  });
+
+  test('--dry-run: genera tutto ma non tocca TikTok né lo storico', async () => {
+    active = happyPath({ caption: 'Caption in prova #test' });
+    const out = await captureLog(() => main(['--dry-run'], { run: fakeRun() }));
 
     assert.match(out, /DRY RUN/);
     assert.match(out, /Caption in prova #test/);
     assert.match(out, /"privacy_level": "SELF_ONLY"/);
+    assert.match(out, /"is_aigc": true/);
     assert.match(out, /"total_chunk_count": 1/);
 
-    // solo Anthropic è stato chiamato
-    assert.equal(active.calls.length, 1);
-    assert.match(active.calls[0].url, /anthropic/);
-    // il video resta in coda, niente archivio
-    assert.deepEqual(await fs.readdir(config.paths.queueDir), ['clip.mp4']);
-    await assert.rejects(() => fs.readdir(config.paths.postedDir));
+    assert.deepEqual(urlsOf(active.calls), ['idea', 'immagine', 'caption']);
+    assert.deepEqual(await readHistory(), []);
   });
 
-  test('--dry-run si ferma comunque su un file troppo grande', async () => {
-    await queueFile('big.mp4', Buffer.alloc(config.tiktok.maxSingleChunkBytes + 1));
+  test('--dry-run lascia su disco immagine e video da guardare', async () => {
     active = happyPath();
+    let result;
+    await captureLog(async () => {
+      result = await main(['--dry-run'], { run: fakeRun() });
+    });
+    assert.equal(await fs.readFile(result.imagePaths[0], 'utf8'), 'png-bytes');
+    assert.ok((await fs.stat(result.videoPath)).size > 0);
+  });
+
+  test('senza foto di riferimento si ferma prima di spendere un centesimo', async () => {
+    await fs.rm(path.join(config.paths.referenceDir, 'borsa.jpg'));
+    active = happyPath();
+
+    const err = await rejects(() => main([], { run: fakeRun() }));
+    assert.match(err.message, /Nessuna foto di riferimento/);
+    assert.equal(active.calls.length, 0);
+  });
+
+  test('un video troppo grande si ferma prima di chiamare TikTok', async () => {
+    config.tiktok.maxSingleChunkBytes = 1024;
+    active = happyPath();
+
     let err;
     await captureLog(async () => {
-      err = await rejects(() => main(['--dry-run']));
+      err = await rejects(() => main([], { run: fakeRun(4096) }));
     });
     assert.match(err.message, /supera il limite/);
+    assert.deepEqual(urlsOf(active.calls), ['idea', 'immagine']);
   });
 
-  test('se la pubblicazione fallisce il video NON viene archiviato', async () => {
-    await queueFile('clip.mp4');
-    active = mockFetch((url) => {
-      if (url.includes('anthropic')) return json({ type: 'message', content: [{ type: 'text', text: 'c' }] });
+  test('se la pubblicazione fallisce lo storico NON viene toccato', async () => {
+    active = mockFetch((url, init) => {
+      if (url.includes('anthropic')) {
+        const body = JSON.parse(init.body);
+        return /JSON/.test(body.system) ? claudeReply(JSON.stringify(IDEA)) : claudeReply('c');
+      }
+      if (url.includes('generativelanguage')) {
+        return json({ output_image: { data: Buffer.from('png').toString('base64') } });
+      }
       if (url.includes('creator_info')) return apiOk({ creator_nickname: 'paolo' });
-      if (url.includes('video/init')) return json({ data: {}, error: { code: 'spam_risk_too_many_posts', message: 'limite' } });
+      if (url.includes('video/init')) {
+        return json({ data: {}, error: { code: 'spam_risk_too_many_posts', message: 'limite' } });
+      }
       throw new Error(`URL non atteso: ${url}`);
     });
 
     let err;
     await captureLog(async () => {
-      err = await rejects(() => main([]));
+      err = await rejects(() => main([], { run: fakeRun() }));
     });
     assert.match(err.message, /spam_risk_too_many_posts/);
-    // il video resta in coda, così il giorno dopo ci riprova
-    assert.deepEqual(await fs.readdir(config.paths.queueDir), ['clip.mp4']);
+    // Niente in storico: domani Claude può riproporre questo modello.
+    assert.deepEqual(await readHistory(), []);
+  });
+
+  test('se Gemini blocca il prompt non si arriva a TikTok', async () => {
+    active = mockFetch((url, init) => {
+      if (url.includes('anthropic')) {
+        const body = JSON.parse(init.body);
+        return /JSON/.test(body.system) ? claudeReply(JSON.stringify(IDEA)) : claudeReply('c');
+      }
+      if (url.includes('generativelanguage')) return json({ finish_reason: 'SAFETY' });
+      throw new Error(`URL non atteso: ${url}`);
+    });
+
+    let err;
+    await captureLog(async () => {
+      err = await rejects(() => main([], { run: fakeRun() }));
+    });
+    assert.match(err.message, /nessuna immagine/);
+    assert.deepEqual(await readHistory(), []);
   });
 });
